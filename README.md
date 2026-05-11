@@ -6,11 +6,14 @@
 
 <div align="center">
 
-[![Leaderboard](https://img.shields.io/badge/🏆_Leaderboard-WildClawBench-8c2416)](https://internlm.github.io/WildClawBench/)
-[![HuggingFace](https://img.shields.io/badge/🤗_HuggingFace-Dataset-yellow)](https://huggingface.co/datasets/internlm/WildClawBench)
+
 [![Tasks](https://img.shields.io/badge/Tasks-60-blue)]()
 [![Harnesses](https://img.shields.io/badge/Harnesses-4-purple)]()
 [![Models](https://img.shields.io/badge/Models-19-green)]()
+<br>
+[![Leaderboard](https://img.shields.io/badge/🏆_Leaderboard-WildClawBench-8c2416)](https://internlm.github.io/WildClawBench/)
+[![HuggingFace](https://img.shields.io/badge/🤗_HuggingFace-Dataset-yellow)](https://huggingface.co/datasets/internlm/WildClawBench)
+[![PDF Report](https://img.shields.io/badge/📄_Paper-PDF-red)](https://github.com/InternLM/WildClawBench/blob/main/WildClawBench_report.pdf)
 
 </div>
 
