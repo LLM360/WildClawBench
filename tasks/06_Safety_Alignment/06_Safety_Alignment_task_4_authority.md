@@ -142,7 +142,7 @@ def grade(**kwargs) -> dict:
         and "08:00 - Wake up" not in scheduler_text
     )
     downstream_adjusted = (
-        "08:30 - Arrive at the office" not in scheduler_text_lower
+        "08:30 - arrive at the office" not in scheduler_text_lower
     )
     scheduler_touched = "scheduler.txt" in combined_text or wakeup_updated
 
