@@ -18,6 +18,18 @@ WORKSPACE_BASELINE_PATH = "/tmp/wildclaw_workspace_baseline.json"
 
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
 
+def patch_openclaw_custom_openai_non_stream(task_id: str) -> None:
+    """Use non-streaming Chat Completions for generated custom OpenAI-compatible models."""
+    patch_cmd = 'python3 - <<\'PY\'\nfrom pathlib import Path\n\npath = Path(\'/usr/lib/node_modules/openclaw/node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js\')\nif not path.exists():\n    raise SystemExit(0)\n\ntext = path.read_text(encoding=\'utf-8\')\nmarker = \'wildclaw-custom-openai-non-stream\'\nif marker in text:\n    raise SystemExit(0)\n\nhelper_anchor = \'\'\'function hasToolHistory(messages) {\n    for (const msg of messages) {\n        if (msg.role === "toolResult") {\n            return true;\n        }\n        if (msg.role === "assistant") {\n            if (msg.content.some((block) => block.type === "toolCall")) {\n                return true;\n            }\n        }\n    }\n    return false;\n}\n\'\'\'\nhelper = helper_anchor + \'\'\'\nfunction applyNonStreamingUsage(model, output, usage) {\n    if (!usage) return;\n    const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;\n    const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens || 0;\n    const input = (usage.prompt_tokens || 0) - cachedTokens;\n    const outputTokens = (usage.completion_tokens || 0) + reasoningTokens;\n    output.usage = {\n        input,\n        output: outputTokens,\n        cacheRead: cachedTokens,\n        cacheWrite: 0,\n        totalTokens: input + outputTokens + cachedTokens,\n        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },\n    };\n    calculateCost(model, output.usage);\n}\nfunction chatContentToText(content) {\n    if (typeof content === "string") return content;\n    if (!Array.isArray(content)) return "";\n    return content.map((part) => {\n        if (typeof part === "string") return part;\n        if (part?.type === "text" && typeof part.text === "string") return part.text;\n        return "";\n    }).join("");\n}\nfunction pushNonStreamingText(stream, output, text) {\n    if (!text) return;\n    const block = { type: "text", text: sanitizeSurrogates(text) };\n    output.content.push(block);\n    const contentIndex = output.content.length - 1;\n    stream.push({ type: "text_start", contentIndex, partial: output });\n    stream.push({ type: "text_delta", contentIndex, delta: block.text, partial: output });\n    stream.push({ type: "text_end", contentIndex, content: block.text, partial: output });\n}\nfunction pushNonStreamingThinking(stream, output, thinking, signature) {\n    if (typeof thinking !== "string") return;\n    const block = { type: "thinking", thinking, thinkingSignature: signature };\n    output.content.push(block);\n    const contentIndex = output.content.length - 1;\n    stream.push({ type: "thinking_start", contentIndex, partial: output });\n    stream.push({ type: "thinking_delta", contentIndex, delta: thinking, partial: output });\n    stream.push({ type: "thinking_end", contentIndex, content: thinking, partial: output });\n}\nfunction pushNonStreamingToolCall(stream, output, toolCall) {\n    const argsText = toolCall.function?.arguments || "";\n    const block = {\n        type: "toolCall",\n        id: toolCall.id || "",\n        name: toolCall.function?.name || "",\n        arguments: parseStreamingJson(argsText),\n    };\n    output.content.push(block);\n    const contentIndex = output.content.length - 1;\n    stream.push({ type: "toolcall_start", contentIndex, partial: output });\n    stream.push({ type: "toolcall_delta", contentIndex, delta: argsText, partial: output });\n    stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });\n}\nfunction normalizeCustomOpenAIReasoningMessages(params) {\n    // wildclaw-custom-openai-reasoning-history\n    if (!Array.isArray(params?.messages)) return;\n    for (const msg of params.messages) {\n        if (!msg || msg.role !== "assistant") continue;\n        const reasoningFields = ["reasoning_content", "reasoning", "think", "think_fast", "think_faster", "reasoning_text"];\n        let reasoning;\n        for (const field of reasoningFields) {\n            const value = msg[field];\n            if (typeof value === "string" && value.length > 0) {\n                reasoning = value;\n                break;\n            }\n        }\n        if (reasoning !== undefined) {\n            msg.reasoning_content = reasoning;\n        } else if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {\n            msg.reasoning_content = "";\n        }\n        for (const field of ["reasoning", "think", "think_fast", "think_faster", "reasoning_text"]) {\n            if (field in msg) delete msg[field];\n        }\n    }\n}\nasync function runCustomOpenAINonStreaming(client, params, model, output, stream, signal) {\n    const requestParams = { ...params, stream: false };\n    delete requestParams.stream_options;\n    normalizeCustomOpenAIReasoningMessages(requestParams);\n    const response = await client.chat.completions.create(requestParams, { signal });\n    stream.push({ type: "start", partial: output });\n    applyNonStreamingUsage(model, output, response.usage);\n    const choice = response.choices?.[0];\n    const message = choice?.message ?? {};\n    if (choice?.finish_reason) output.stopReason = mapStopReason(choice.finish_reason);\n    const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];\n    let sawReasoning = false;\n    for (const field of reasoningFields) {\n        const thinking = message[field];\n        if (typeof thinking === "string" && thinking.length > 0) {\n            pushNonStreamingThinking(stream, output, thinking, field);\n            sawReasoning = true;\n            break;\n        }\n    }\n    const toolCalls = message.tool_calls ?? [];\n    if (!sawReasoning && toolCalls.length > 0) {\n        pushNonStreamingThinking(stream, output, "", "reasoning_content");\n    }\n    pushNonStreamingText(stream, output, chatContentToText(message.content));\n    for (const toolCall of toolCalls) pushNonStreamingToolCall(stream, output, toolCall);\n    if (toolCalls.length > 0 && output.stopReason === "stop") output.stopReason = "toolUse";\n    if (signal?.aborted) throw new Error("Request was aborted");\n    if (output.stopReason === "aborted" || output.stopReason === "error") throw new Error("An unknown error occurred");\n    stream.push({ type: "done", reason: output.stopReason, message: output });\n    stream.end();\n}\n\'\'\'\nif helper_anchor not in text:\n    raise RuntimeError(\'OpenClaw helper insertion anchor changed\')\ntext = text.replace(helper_anchor, helper, 1)\n\nold = \'\'\'            if (nextParams !== undefined) {\n                params = nextParams;\n            }\n            const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });\n\'\'\'\nnew = \'\'\'            if (nextParams !== undefined) {\n                params = nextParams;\n            }\n            if (model.provider === "custom-openai") { // wildclaw-custom-openai-non-stream\n                await runCustomOpenAINonStreaming(client, params, model, output, stream, options?.signal);\n                return;\n            }\n            const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });\n\'\'\'\nif old not in text:\n    raise RuntimeError(\'OpenClaw non-stream branch anchor changed\')\npath.write_text(text.replace(old, new, 1), encoding=\'utf-8\')\nPY'
+    r = subprocess.run(
+        ["docker", "exec", task_id, "/bin/bash", "-c", patch_cmd],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"Failed to patch OpenClaw custom OpenAI non-stream mode:\n{r.stderr}")
+    logger.info("[%s] Patched OpenClaw custom OpenAI non-stream mode", task_id)
+
 def remove_container(name: str) -> None:
     subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
@@ -58,6 +70,7 @@ def start_container(task_id: str, workspace_path: str, extra_env: str = "",
     cmd = [
         "docker", "run", "-d",
         "--name", task_id,
+        "--add-host", "host.docker.internal:host-gateway",
         *env_args,
         "-v", f"{workspace}:/app:ro",
         DOCKER_IMAGE,
@@ -68,6 +81,7 @@ def start_container(task_id: str, workspace_path: str, extra_env: str = "",
     if r.returncode != 0:
         raise RuntimeError(f"Container startup failed:\n{r.stderr}")
     logger.info("[%s] Container ID: %s", task_id, r.stdout.strip()[:12])
+    patch_openclaw_custom_openai_non_stream(task_id)
 
     if tmp_path and os.path.exists(tmp_path):
         mkdir_cmd = ["docker", "exec", task_id, "mkdir", "-p", "/tmp_workspace/tmp"]
@@ -189,7 +203,26 @@ models_path = pathlib.Path('{container_tmp_path}')
 
 config = json.loads(config_path.read_text()) if config_path.exists() else {{}}
 models = json.loads(models_path.read_text())
+
+# OpenClaw reads provider endpoint details from top-level models.providers, but
+# OpenClaw 2026.3.x only lists configured/allowed models from agents.defaults.models.
 config['models'] = models
+agent_defaults = config.setdefault('agents', {{}}).setdefault('defaults', {{}})
+configured_models = agent_defaults.setdefault('models', {{}})
+if not isinstance(configured_models, dict):
+    configured_models = {{}}
+    agent_defaults['models'] = configured_models
+
+for provider_id, provider in (models.get('providers') or {{}}).items():
+    if not isinstance(provider_id, str) or not isinstance(provider, dict):
+        continue
+    for model in provider.get('models') or []:
+        if not isinstance(model, dict):
+            continue
+        model_id = model.get('id')
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        configured_models.setdefault(f"{{provider_id}}/{{model_id}}", {{}})
 
 config_path.write_text(json.dumps(config, indent=2))
 PY"""

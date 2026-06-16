@@ -60,7 +60,7 @@ def build_run_batch_parser(default_model: str, default_parallel: int) -> argpars
     parser.add_argument(
         "--thinking",
         default=None,
-        help="Thinking/reasoning level for the model (default: high)",
+        help="Thinking/reasoning level for the model. If omitted, the backend or wrapper default is used.",
     )
     parser.add_argument(
         "--openclaw-image-model",

@@ -54,6 +54,7 @@ OUTPUT_DIR       = ROOT_DIR / os.environ.get("OUTPUT_SUBDIR", "output")
 
 DEFAULT_MODEL    = os.environ.get("DEFAULT_MODEL",    "openrouter/anthropic/claude-sonnet-4.6")
 DEFAULT_PARALLEL = int(os.environ.get("DEFAULT_PARALLEL", "1"))
+OUTPUT_MODEL_DIR_ENV = "WILDCLAW_OUTPUT_MODEL_DIR"
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL_OPENCLAW = normalize_openrouter_base_url_for_openclaw(
@@ -63,6 +64,7 @@ OPENROUTER_BASE_URL_CLAUDECODE = normalize_openrouter_base_url_for_claudecode(
     os.environ.get("OPENROUTER_BASE_URL", "")
 )
 MODELS_API_KEY_PLACEHOLDER = "${MY_PROXY_API_KEY}"
+OUTPUT_LAYOUT = os.environ.get("WILDCLAW_OUTPUT_LAYOUT", "category_task_run").strip().lower()
 
 ALL_CATEGORIES = [
     "01_Productivity_Flow",
@@ -156,6 +158,49 @@ def collect_task_output(
         logger.warning("[%s] Failed to collect task output: %s", task_id, exc)
 
 
+def safe_output_name(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9.\-_]", "_", value)
+
+
+def default_output_model_name(model: str, lobster: dict | None = None) -> str:
+    short_model = safe_output_name(model.rsplit("/", 1)[-1])
+    if lobster:
+        return f"{safe_output_name(lobster['name'])}_{short_model}"
+    return short_model
+
+
+def output_model_name(model: str, lobster: dict | None = None) -> str:
+    override = os.environ.get(OUTPUT_MODEL_DIR_ENV, "").strip()
+    if override:
+        return safe_output_name(override)
+    return default_output_model_name(model, lobster)
+
+
+def reserve_output_model_dir(output_root: Path, model: str, lobster: dict | None) -> str:
+    base_name = default_output_model_name(model, lobster)
+    trial = 1
+    while True:
+        candidate = base_name if trial == 1 else f"{base_name}-trial-{trial}"
+        try:
+            (output_root / candidate).mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            trial += 1
+
+
+def task_output_dir(
+    output_root: Path,
+    task_id: str,
+    model: str,
+    lobster: dict | None,
+    suffix: str,
+    category: str,
+) -> Path:
+    if OUTPUT_LAYOUT in {"model_task", "model-task"}:
+        return output_root / output_model_name(model, lobster) / task_id
+    return output_root / category / task_id / suffix
+
+
 def load_models_config(models_config_path: Path) -> dict:
     raw_config = models_config_path.read_text(encoding="utf-8")
     proxy_api_key = os.environ.get("MY_PROXY_API_KEY")
@@ -200,12 +245,19 @@ def run_single_task(
     run_id = uuid.uuid4().hex[:6]
     _m = re.match(r"(\d+)_.*?(task_\d+)", task_id_ori)
     short_task_id = f"{_m.group(1)}_{_m.group(2)}" if _m else task_id_ori
-    short_model = re.sub(r'[^a-zA-Z0-9.\-_]', '_', model.rsplit('/', 1)[-1])
-    lobster_prefix = f"{lobster['name']}_" if lobster else ""
+    short_model = safe_output_name(model.rsplit('/', 1)[-1])
+    lobster_prefix = f"{safe_output_name(lobster['name'])}_" if lobster else ""
     suffix = f"{lobster_prefix}{short_model}_{timestamp}_{run_id}"
     task_id = f"{short_task_id}_{lobster_prefix}{short_model}_{timestamp}_{run_id}"
 
-    output_dir = output_root / task["category"] / f"{task_id_ori}" / f"{suffix}"
+    output_dir = task_output_dir(
+        output_root=output_root,
+        task_id=task_id_ori,
+        model=model,
+        lobster=lobster,
+        suffix=suffix,
+        category=task["category"],
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     result = {"task_id": task_id, "scores": {}, "error": None}
@@ -359,6 +411,17 @@ def main() -> None:
         logger.info("Lobster mode: %s (workspace=%s, env_keys=%s)",
                      lobster["name"], lobster["workspace"], lobster["env"])
 
+    if OUTPUT_LAYOUT in {"model_task", "model-task"}:
+        output_model_dir = os.environ.get(OUTPUT_MODEL_DIR_ENV, "").strip()
+        if output_model_dir:
+            output_model_dir = safe_output_name(output_model_dir)
+            os.environ[OUTPUT_MODEL_DIR_ENV] = output_model_dir
+            (output_root / output_model_dir).mkdir(parents=True, exist_ok=True)
+        else:
+            output_model_dir = reserve_output_model_dir(output_root, args.model, lobster)
+            os.environ[OUTPUT_MODEL_DIR_ENV] = output_model_dir
+        logger.info("Output model directory: %s", output_root / output_model_dir)
+
     if args.task:
         task_file = Path(args.task)
         if not task_file.exists():
@@ -384,7 +447,7 @@ def main() -> None:
         categories = [args.category]
 
     all_results: list[dict] = []
-    safe_model_name = re.sub(r'[^a-zA-Z0-9.\-_]', '_', args.model)
+    safe_model_name = safe_output_name(args.model)
 
     for category in categories:
         category_dir = TASKS_DIR / category
