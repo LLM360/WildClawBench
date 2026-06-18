@@ -108,23 +108,38 @@ function pushNonStreamingToolCall(stream, output, toolCall) {
     stream.push({ type: "toolcall_delta", contentIndex, delta: argsText, partial: output });
     stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
 }
+function readReasoningContent(msg) {
+    const reasoningFields = ["reasoning_content", "reasoning", "think", "think_fast", "think_faster", "reasoning_text"];
+    for (const field of reasoningFields) {
+        const value = msg[field];
+        if (hasNonEmptyText(value)) return value;
+    }
+    if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+            if (block?.type === "thinking" && hasNonEmptyText(block.thinking)) return block.thinking;
+        }
+    }
+    for (const field of reasoningFields) {
+        const value = msg[field];
+        if (typeof value === "string") return value;
+    }
+    if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+            if (block?.type === "thinking" && typeof block.thinking === "string") return block.thinking;
+        }
+    }
+    return CUSTOM_OPENAI_REASONING_PLACEHOLDER;
+}
 function normalizeCustomOpenAIReasoningMessages(params) {
     // wildclaw-custom-openai-reasoning-history
     if (!Array.isArray(params?.messages)) return;
     for (const msg of params.messages) {
         if (!msg || msg.role !== "assistant") continue;
-        const reasoningFields = ["reasoning_content", "reasoning", "think", "think_fast", "think_faster", "reasoning_text"];
-        let reasoning;
-        for (const field of reasoningFields) {
-            const value = msg[field];
-            if (hasNonEmptyText(value)) {
-                reasoning = value;
-                break;
-            }
+        msg.reasoning_content = readReasoningContent(msg);
+        if (Array.isArray(msg.content)) {
+            msg.content = msg.content.filter((block) => block?.type !== "thinking");
+            if (msg.content.length === 0) msg.content = "";
         }
-        msg.reasoning_content = reasoning !== undefined
-            ? reasoning
-            : CUSTOM_OPENAI_REASONING_PLACEHOLDER;
         for (const field of ["reasoning", "think", "think_fast", "think_faster", "reasoning_text"]) {
             if (field in msg) delete msg[field];
         }
@@ -151,7 +166,7 @@ async function runCustomOpenAINonStreaming(client, params, model, output, stream
         }
     }
     const toolCalls = message.tool_calls ?? [];
-    if (!sawReasoning && toolCalls.length > 0) {
+    if (!sawReasoning) {
         pushNonStreamingThinking(stream, output, CUSTOM_OPENAI_REASONING_PLACEHOLDER, "reasoning_content");
     }
     pushNonStreamingText(stream, output, chatContentToText(message.content));
@@ -285,34 +300,6 @@ def setup_workspace(
         if thinking_result.returncode != 0:
             raise RuntimeError(
                 f"Failed to set thinkingDefault to {thinking}:\n{thinking_result.stderr}"
-            )
-
-    if preserve_thinking is not None:
-        logger.info("[%s] Setting preserveThinking to %s", task_id, preserve_thinking)
-        preserve_thinking_json = json.dumps(preserve_thinking)
-        preserve_thinking_cmd = f"""python3 - <<'PY'
-import json
-import pathlib
-
-config_path = pathlib.Path('/root/.openclaw/openclaw.json')
-config = json.loads(config_path.read_text()) if config_path.exists() else {{}}
-agent_defaults = config.setdefault('agents', {{}}).setdefault('defaults', {{}})
-params = agent_defaults.setdefault('params', {{}})
-if not isinstance(params, dict):
-    params = {{}}
-    agent_defaults['params'] = params
-params['preserveThinking'] = json.loads({preserve_thinking_json!r})
-config_path.parent.mkdir(parents=True, exist_ok=True)
-config_path.write_text(json.dumps(config, indent=2))
-PY"""
-        preserve_result = subprocess.run(
-            ["docker", "exec", task_id, "/bin/bash", "-c", preserve_thinking_cmd],
-            capture_output=True, text=True,
-        )
-        if preserve_result.returncode != 0:
-            raise RuntimeError(
-                "Failed to set preserveThinking to "
-                f"{preserve_thinking}:\n{preserve_result.stderr}"
             )
 
     # Symlink OpenClaw workspace → TMP_WORKSPACE so the image tool's

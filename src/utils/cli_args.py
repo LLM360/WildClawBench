@@ -72,8 +72,8 @@ def build_run_batch_parser(default_model: str, default_parallel: int) -> argpars
         choices=["true", "false"],
         default=None,
         help=(
-            "Set OpenClaw agents.defaults.params.preserveThinking for each task. "
-            "Use true to replay preserved reasoning_content on supported models."
+            "Preserve reasoning_content on replayed OpenClaw assistant turns. "
+            "Use true for DeepSeek-style OpenAI-compatible backends that require it."
         ),
     )
     return parser
