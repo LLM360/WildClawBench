@@ -20,7 +20,173 @@ BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
 
 def patch_openclaw_custom_openai_non_stream(task_id: str) -> None:
     """Use non-streaming Chat Completions for generated custom OpenAI-compatible models."""
-    patch_cmd = 'python3 - <<\'PY\'\nfrom pathlib import Path\n\npath = Path(\'/usr/lib/node_modules/openclaw/node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js\')\nif not path.exists():\n    raise SystemExit(0)\n\ntext = path.read_text(encoding=\'utf-8\')\nmarker = \'wildclaw-custom-openai-non-stream\'\nif marker in text:\n    raise SystemExit(0)\n\nhelper_anchor = \'\'\'function hasToolHistory(messages) {\n    for (const msg of messages) {\n        if (msg.role === "toolResult") {\n            return true;\n        }\n        if (msg.role === "assistant") {\n            if (msg.content.some((block) => block.type === "toolCall")) {\n                return true;\n            }\n        }\n    }\n    return false;\n}\n\'\'\'\nhelper = helper_anchor + \'\'\'\nfunction applyNonStreamingUsage(model, output, usage) {\n    if (!usage) return;\n    const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;\n    const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens || 0;\n    const input = (usage.prompt_tokens || 0) - cachedTokens;\n    const outputTokens = (usage.completion_tokens || 0) + reasoningTokens;\n    output.usage = {\n        input,\n        output: outputTokens,\n        cacheRead: cachedTokens,\n        cacheWrite: 0,\n        totalTokens: input + outputTokens + cachedTokens,\n        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },\n    };\n    calculateCost(model, output.usage);\n}\nfunction chatContentToText(content) {\n    if (typeof content === "string") return content;\n    if (!Array.isArray(content)) return "";\n    return content.map((part) => {\n        if (typeof part === "string") return part;\n        if (part?.type === "text" && typeof part.text === "string") return part.text;\n        return "";\n    }).join("");\n}\nfunction pushNonStreamingText(stream, output, text) {\n    if (!text) return;\n    const block = { type: "text", text: sanitizeSurrogates(text) };\n    output.content.push(block);\n    const contentIndex = output.content.length - 1;\n    stream.push({ type: "text_start", contentIndex, partial: output });\n    stream.push({ type: "text_delta", contentIndex, delta: block.text, partial: output });\n    stream.push({ type: "text_end", contentIndex, content: block.text, partial: output });\n}\nfunction pushNonStreamingThinking(stream, output, thinking, signature) {\n    if (typeof thinking !== "string") return;\n    const block = { type: "thinking", thinking, thinkingSignature: signature };\n    output.content.push(block);\n    const contentIndex = output.content.length - 1;\n    stream.push({ type: "thinking_start", contentIndex, partial: output });\n    stream.push({ type: "thinking_delta", contentIndex, delta: thinking, partial: output });\n    stream.push({ type: "thinking_end", contentIndex, content: thinking, partial: output });\n}\nfunction pushNonStreamingToolCall(stream, output, toolCall) {\n    const argsText = toolCall.function?.arguments || "";\n    const block = {\n        type: "toolCall",\n        id: toolCall.id || "",\n        name: toolCall.function?.name || "",\n        arguments: parseStreamingJson(argsText),\n    };\n    output.content.push(block);\n    const contentIndex = output.content.length - 1;\n    stream.push({ type: "toolcall_start", contentIndex, partial: output });\n    stream.push({ type: "toolcall_delta", contentIndex, delta: argsText, partial: output });\n    stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });\n}\nfunction normalizeCustomOpenAIReasoningMessages(params) {\n    // wildclaw-custom-openai-reasoning-history\n    if (!Array.isArray(params?.messages)) return;\n    for (const msg of params.messages) {\n        if (!msg || msg.role !== "assistant") continue;\n        const reasoningFields = ["reasoning_content", "reasoning", "think", "think_fast", "think_faster", "reasoning_text"];\n        let reasoning;\n        for (const field of reasoningFields) {\n            const value = msg[field];\n            if (typeof value === "string" && value.length > 0) {\n                reasoning = value;\n                break;\n            }\n        }\n        if (reasoning !== undefined) {\n            msg.reasoning_content = reasoning;\n        } else if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {\n            msg.reasoning_content = "";\n        }\n        for (const field of ["reasoning", "think", "think_fast", "think_faster", "reasoning_text"]) {\n            if (field in msg) delete msg[field];\n        }\n    }\n}\nasync function runCustomOpenAINonStreaming(client, params, model, output, stream, signal) {\n    const requestParams = { ...params, stream: false };\n    delete requestParams.stream_options;\n    normalizeCustomOpenAIReasoningMessages(requestParams);\n    const response = await client.chat.completions.create(requestParams, { signal });\n    stream.push({ type: "start", partial: output });\n    applyNonStreamingUsage(model, output, response.usage);\n    const choice = response.choices?.[0];\n    const message = choice?.message ?? {};\n    if (choice?.finish_reason) output.stopReason = mapStopReason(choice.finish_reason);\n    const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];\n    let sawReasoning = false;\n    for (const field of reasoningFields) {\n        const thinking = message[field];\n        if (typeof thinking === "string" && thinking.length > 0) {\n            pushNonStreamingThinking(stream, output, thinking, field);\n            sawReasoning = true;\n            break;\n        }\n    }\n    const toolCalls = message.tool_calls ?? [];\n    if (!sawReasoning && toolCalls.length > 0) {\n        pushNonStreamingThinking(stream, output, "", "reasoning_content");\n    }\n    pushNonStreamingText(stream, output, chatContentToText(message.content));\n    for (const toolCall of toolCalls) pushNonStreamingToolCall(stream, output, toolCall);\n    if (toolCalls.length > 0 && output.stopReason === "stop") output.stopReason = "toolUse";\n    if (signal?.aborted) throw new Error("Request was aborted");\n    if (output.stopReason === "aborted" || output.stopReason === "error") throw new Error("An unknown error occurred");\n    stream.push({ type: "done", reason: output.stopReason, message: output });\n    stream.end();\n}\n\'\'\'\nif helper_anchor not in text:\n    raise RuntimeError(\'OpenClaw helper insertion anchor changed\')\ntext = text.replace(helper_anchor, helper, 1)\n\nold = \'\'\'            if (nextParams !== undefined) {\n                params = nextParams;\n            }\n            const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });\n\'\'\'\nnew = \'\'\'            if (nextParams !== undefined) {\n                params = nextParams;\n            }\n            if (model.provider === "custom-openai") { // wildclaw-custom-openai-non-stream\n                await runCustomOpenAINonStreaming(client, params, model, output, stream, options?.signal);\n                return;\n            }\n            const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });\n\'\'\'\nif old not in text:\n    raise RuntimeError(\'OpenClaw non-stream branch anchor changed\')\npath.write_text(text.replace(old, new, 1), encoding=\'utf-8\')\nPY'
+    patch_cmd = r"""python3 - <<'PY'
+from pathlib import Path
+
+path = Path('/usr/lib/node_modules/openclaw/node_modules/@mariozechner/pi-ai/dist/providers/openai-completions.js')
+if not path.exists():
+    raise SystemExit(0)
+
+text = path.read_text(encoding='utf-8')
+marker = 'wildclaw-custom-openai-non-stream-v2'
+if marker in text:
+    raise SystemExit(0)
+
+helper_anchor = '''function hasToolHistory(messages) {
+    for (const msg of messages) {
+        if (msg.role === "toolResult") {
+            return true;
+        }
+        if (msg.role === "assistant") {
+            if (msg.content.some((block) => block.type === "toolCall")) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+'''
+helper = helper_anchor + '''
+const CUSTOM_OPENAI_REASONING_PLACEHOLDER = "";
+function hasNonEmptyText(value) {
+    return typeof value === "string" && value.trim().length > 0;
+}
+function applyNonStreamingUsage(model, output, usage) {
+    if (!usage) return;
+    const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;
+    const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens || 0;
+    const input = (usage.prompt_tokens || 0) - cachedTokens;
+    const outputTokens = (usage.completion_tokens || 0) + reasoningTokens;
+    output.usage = {
+        input,
+        output: outputTokens,
+        cacheRead: cachedTokens,
+        cacheWrite: 0,
+        totalTokens: input + outputTokens + cachedTokens,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+    calculateCost(model, output.usage);
+}
+function chatContentToText(content) {
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content.map((part) => {
+        if (typeof part === "string") return part;
+        if (part?.type === "text" && typeof part.text === "string") return part.text;
+        return "";
+    }).join("");
+}
+function pushNonStreamingText(stream, output, text) {
+    if (!text) return;
+    const block = { type: "text", text: sanitizeSurrogates(text) };
+    output.content.push(block);
+    const contentIndex = output.content.length - 1;
+    stream.push({ type: "text_start", contentIndex, partial: output });
+    stream.push({ type: "text_delta", contentIndex, delta: block.text, partial: output });
+    stream.push({ type: "text_end", contentIndex, content: block.text, partial: output });
+}
+function pushNonStreamingThinking(stream, output, thinking, signature) {
+    if (typeof thinking !== "string") return;
+    const block = { type: "thinking", thinking, thinkingSignature: signature };
+    output.content.push(block);
+    const contentIndex = output.content.length - 1;
+    stream.push({ type: "thinking_start", contentIndex, partial: output });
+    stream.push({ type: "thinking_delta", contentIndex, delta: thinking, partial: output });
+    stream.push({ type: "thinking_end", contentIndex, content: thinking, partial: output });
+}
+function pushNonStreamingToolCall(stream, output, toolCall) {
+    const argsText = toolCall.function?.arguments || "";
+    const block = {
+        type: "toolCall",
+        id: toolCall.id || "",
+        name: toolCall.function?.name || "",
+        arguments: parseStreamingJson(argsText),
+    };
+    output.content.push(block);
+    const contentIndex = output.content.length - 1;
+    stream.push({ type: "toolcall_start", contentIndex, partial: output });
+    stream.push({ type: "toolcall_delta", contentIndex, delta: argsText, partial: output });
+    stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
+}
+function normalizeCustomOpenAIReasoningMessages(params) {
+    // wildclaw-custom-openai-reasoning-history
+    if (!Array.isArray(params?.messages)) return;
+    for (const msg of params.messages) {
+        if (!msg || msg.role !== "assistant") continue;
+        const reasoningFields = ["reasoning_content", "reasoning", "think", "think_fast", "think_faster", "reasoning_text"];
+        let reasoning;
+        for (const field of reasoningFields) {
+            const value = msg[field];
+            if (hasNonEmptyText(value)) {
+                reasoning = value;
+                break;
+            }
+        }
+        if (reasoning !== undefined) {
+            msg.reasoning_content = reasoning;
+        } else if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+            msg.reasoning_content = CUSTOM_OPENAI_REASONING_PLACEHOLDER;
+        }
+        for (const field of ["reasoning", "think", "think_fast", "think_faster", "reasoning_text"]) {
+            if (field in msg) delete msg[field];
+        }
+    }
+}
+async function runCustomOpenAINonStreaming(client, params, model, output, stream, signal) {
+    const requestParams = { ...params, stream: false };
+    delete requestParams.stream_options;
+    normalizeCustomOpenAIReasoningMessages(requestParams);
+    const response = await client.chat.completions.create(requestParams, { signal });
+    stream.push({ type: "start", partial: output });
+    applyNonStreamingUsage(model, output, response.usage);
+    const choice = response.choices?.[0];
+    const message = choice?.message ?? {};
+    if (choice?.finish_reason) output.stopReason = mapStopReason(choice.finish_reason);
+    const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
+    let sawReasoning = false;
+    for (const field of reasoningFields) {
+        const thinking = message[field];
+        if (hasNonEmptyText(thinking)) {
+            pushNonStreamingThinking(stream, output, thinking, field);
+            sawReasoning = true;
+            break;
+        }
+    }
+    const toolCalls = message.tool_calls ?? [];
+    if (!sawReasoning && toolCalls.length > 0) {
+        pushNonStreamingThinking(stream, output, CUSTOM_OPENAI_REASONING_PLACEHOLDER, "reasoning_content");
+    }
+    pushNonStreamingText(stream, output, chatContentToText(message.content));
+    for (const toolCall of toolCalls) pushNonStreamingToolCall(stream, output, toolCall);
+    if (toolCalls.length > 0 && output.stopReason === "stop") output.stopReason = "toolUse";
+    if (signal?.aborted) throw new Error("Request was aborted");
+    if (output.stopReason === "aborted" || output.stopReason === "error") throw new Error("An unknown error occurred");
+    stream.push({ type: "done", reason: output.stopReason, message: output });
+    stream.end();
+}
+'''
+if helper_anchor not in text:
+    raise RuntimeError('OpenClaw helper insertion anchor changed')
+text = text.replace(helper_anchor, helper, 1)
+
+old = '''            if (nextParams !== undefined) {
+                params = nextParams;
+            }
+            const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });
+'''
+new = '''            if (nextParams !== undefined) {
+                params = nextParams;
+            }
+            if (model.provider === "custom-openai") { // wildclaw-custom-openai-non-stream-v2
+                await runCustomOpenAINonStreaming(client, params, model, output, stream, options?.signal);
+                return;
+            }
+            const openaiStream = await client.chat.completions.create(params, { signal: options?.signal });
+'''
+if old not in text:
+    raise RuntimeError('OpenClaw non-stream branch anchor changed')
+path.write_text(text.replace(old, new, 1), encoding='utf-8')
+PY"""
     r = subprocess.run(
         ["docker", "exec", task_id, "/bin/bash", "-c", patch_cmd],
         capture_output=True,
@@ -97,7 +263,11 @@ def start_container(task_id: str, workspace_path: str, extra_env: str = "",
         else:
             logger.info("[%s] Temp file copy complete", task_id)
 
-def setup_workspace(task_id: str, thinking: str | None = None) -> None:
+def setup_workspace(
+    task_id: str,
+    thinking: str | None = None,
+    preserve_thinking: bool | None = None,
+) -> None:
     logger.info("[%s] Copying /app → %s", task_id, TMP_WORKSPACE)
     r = subprocess.run(
         ["docker", "exec", task_id, "/bin/bash", "-c",
@@ -117,6 +287,34 @@ def setup_workspace(task_id: str, thinking: str | None = None) -> None:
         if thinking_result.returncode != 0:
             raise RuntimeError(
                 f"Failed to set thinkingDefault to {thinking}:\n{thinking_result.stderr}"
+            )
+
+    if preserve_thinking is not None:
+        logger.info("[%s] Setting preserveThinking to %s", task_id, preserve_thinking)
+        preserve_thinking_json = json.dumps(preserve_thinking)
+        preserve_thinking_cmd = f"""python3 - <<'PY'
+import json
+import pathlib
+
+config_path = pathlib.Path('/root/.openclaw/openclaw.json')
+config = json.loads(config_path.read_text()) if config_path.exists() else {{}}
+agent_defaults = config.setdefault('agents', {{}}).setdefault('defaults', {{}})
+params = agent_defaults.setdefault('params', {{}})
+if not isinstance(params, dict):
+    params = {{}}
+    agent_defaults['params'] = params
+params['preserveThinking'] = {preserve_thinking_json}
+config_path.parent.mkdir(parents=True, exist_ok=True)
+config_path.write_text(json.dumps(config, indent=2))
+PY"""
+        preserve_result = subprocess.run(
+            ["docker", "exec", task_id, "/bin/bash", "-c", preserve_thinking_cmd],
+            capture_output=True, text=True,
+        )
+        if preserve_result.returncode != 0:
+            raise RuntimeError(
+                "Failed to set preserveThinking to "
+                f"{preserve_thinking}:\n{preserve_result.stderr}"
             )
 
     # Symlink OpenClaw workspace → TMP_WORKSPACE so the image tool's

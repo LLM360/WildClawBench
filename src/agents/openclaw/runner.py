@@ -67,7 +67,11 @@ class OpenClawAgent(BaseAgent):
             if spec.lobster:
                 inject_lobster_workspace(spec.task_id, spec.lobster["workspace"])
 
-            setup_workspace(spec.task_id, thinking=spec.thinking)
+            setup_workspace(
+                spec.task_id,
+                thinking=spec.thinking,
+                preserve_thinking=spec.openclaw_preserve_thinking,
+            )
             setup_skills(spec.task_id, spec.task.get("skills", ""), spec.task.get("skills_path", ""))
             run_warmup(spec.task_id, spec.task.get("warmup", ""))
 

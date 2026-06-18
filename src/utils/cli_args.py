@@ -67,6 +67,15 @@ def build_run_batch_parser(default_model: str, default_parallel: int) -> argpars
         default=None,
         help="Optional OpenClaw image tool model. If unset, falls back to the chat --model.",
     )
+    parser.add_argument(
+        "--openclaw-preserve-thinking",
+        choices=["true", "false"],
+        default=None,
+        help=(
+            "Set OpenClaw agents.defaults.params.preserveThinking for each task. "
+            "Use true to replay preserved reasoning_content on supported models."
+        ),
+    )
     return parser
 
 

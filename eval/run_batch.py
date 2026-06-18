@@ -227,6 +227,7 @@ def run_single_task(
     lobster: dict | None = None,
     thinking: str | None = None,
     models_config: dict | None = None,
+    openclaw_preserve_thinking: bool | None = None,
 ) -> dict:
     """
     Execute a single task, returning a {"task_id", "scores", "error"} dict.
@@ -278,6 +279,7 @@ def run_single_task(
                 model=model,
                 thinking=thinking,
                 models_config=models_config,
+                openclaw_preserve_thinking=openclaw_preserve_thinking,
                 lobster=lobster,
             )
         )
@@ -393,6 +395,15 @@ def main() -> None:
             logger.error("Invalid models config: %s", exc)
             sys.exit(1)
 
+    if args.openclaw_preserve_thinking is not None and args.agent_backend != "openclaw":
+        logger.error("--openclaw-preserve-thinking only applies to the openclaw backend")
+        sys.exit(1)
+    openclaw_preserve_thinking = (
+        None
+        if args.openclaw_preserve_thinking is None
+        else args.openclaw_preserve_thinking == "true"
+    )
+
     lobster = None
     if args.lobster_workspace:
         if not args.lobster_name:
@@ -437,6 +448,7 @@ def main() -> None:
             lobster=lobster,
             models_config=models_config,
             thinking=args.thinking,
+            openclaw_preserve_thinking=openclaw_preserve_thinking,
         )
         if result.get("error") or (result.get("scores") or {}).get("error"):
             sys.exit(1)
@@ -485,6 +497,7 @@ def main() -> None:
                         lobster=lobster,
                         models_config=models_config,
                         thinking=args.thinking,
+                        openclaw_preserve_thinking=openclaw_preserve_thinking,
                     )
                 )
         else:
@@ -499,6 +512,7 @@ def main() -> None:
                         lobster,
                         args.thinking,
                         models_config,
+                        openclaw_preserve_thinking,
                     ): task["task_id"]
                     for task in tasks
                 }

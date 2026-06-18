@@ -16,6 +16,10 @@ Options handled by this wrapper:
   --model_base_url URL   Use a custom OpenAI-compatible endpoint.
   --model_name NAME      Model id/name for the custom endpoint.
   --api_key KEY          Optional API key for the custom endpoint.
+  --preserve-thinking [BOOL]
+                         Set OpenClaw agents.defaults.params.preserveThinking.
+                         With no BOOL, defaults to true. Also accepts
+                         --no-preserve-thinking.
   -h, --help             Show this help.
 
 All remaining arguments are forwarded to script/run.sh for each task.
@@ -58,9 +62,27 @@ model_base_url=""
 model_name=""
 api_key=""
 api_key_set=0
+preserve_thinking=""
 forwarded_model=0
 forwarded_models_config=0
 forward_args=()
+
+normalize_bool() {
+  local name="$1"
+  local value="$2"
+  case "${value,,}" in
+    1|true|yes|y|on)
+      printf '%s\n' true
+      ;;
+    0|false|no|n|off)
+      printf '%s\n' false
+      ;;
+    *)
+      echo "$name must be a boolean: true/false, yes/no, on/off, or 1/0; got: $value" >&2
+      exit 1
+      ;;
+  esac
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -122,6 +144,23 @@ while [[ $# -gt 0 ]]; do
       api_key_set=1
       shift
       ;;
+    --preserve-thinking|--preserveThinking)
+      if [[ $# -ge 2 && ! "$2" =~ ^- ]]; then
+        preserve_thinking="$(normalize_bool "$1" "$2")"
+        shift 2
+      else
+        preserve_thinking="true"
+        shift
+      fi
+      ;;
+    --preserve-thinking=*|--preserveThinking=*)
+      preserve_thinking="$(normalize_bool "${1%%=*}" "${1#*=}")"
+      shift
+      ;;
+    --no-preserve-thinking|--no-preserveThinking)
+      preserve_thinking="false"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -179,6 +218,14 @@ if [[ "$custom_endpoint_requested" -eq 1 ]]; then
     echo "Do not pass --models-config with --model_base_url/--model_name; the wrapper generates the config automatically." >&2
     exit 1
   fi
+fi
+
+if [[ -n "$preserve_thinking" ]]; then
+  if [[ "$backend" != "openclaw" ]]; then
+    echo "--preserve-thinking configures OpenClaw only; backend must be openclaw." >&2
+    exit 1
+  fi
+  forward_args=(--openclaw-preserve-thinking "$preserve_thinking" "${forward_args[@]}")
 fi
 
 custom_models_config=""

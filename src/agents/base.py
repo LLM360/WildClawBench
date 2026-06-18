@@ -18,6 +18,7 @@ class AgentTaskSpec:
     model: str
     thinking: str | None = None
     models_config: dict[str, Any] | None = None
+    openclaw_preserve_thinking: bool | None = None
     lobster: dict[str, Any] | None = None
 
 
