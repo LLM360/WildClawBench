@@ -301,7 +301,7 @@ params = agent_defaults.setdefault('params', {{}})
 if not isinstance(params, dict):
     params = {{}}
     agent_defaults['params'] = params
-params['preserveThinking'] = {preserve_thinking_json}
+params['preserveThinking'] = json.loads({preserve_thinking_json!r})
 config_path.parent.mkdir(parents=True, exist_ok=True)
 config_path.write_text(json.dumps(config, indent=2))
 PY"""
