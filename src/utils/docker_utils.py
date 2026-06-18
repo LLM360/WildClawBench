@@ -122,11 +122,9 @@ function normalizeCustomOpenAIReasoningMessages(params) {
                 break;
             }
         }
-        if (reasoning !== undefined) {
-            msg.reasoning_content = reasoning;
-        } else if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
-            msg.reasoning_content = CUSTOM_OPENAI_REASONING_PLACEHOLDER;
-        }
+        msg.reasoning_content = reasoning !== undefined
+            ? reasoning
+            : CUSTOM_OPENAI_REASONING_PLACEHOLDER;
         for (const field of ["reasoning", "think", "think_fast", "think_faster", "reasoning_text"]) {
             if (field in msg) delete msg[field];
         }
