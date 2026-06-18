@@ -56,9 +56,27 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--model-dir",
+        dest="model_dirs",
+        action="append",
+        default=[],
+        help=(
+            "Exact output model/run directory to include under output/<backend>. "
+            "May be repeated, e.g. --model-dir model --model-dir model-trial-2."
+        ),
+    )
+    parser.add_argument(
         "--all-runs",
         action="store_true",
         help="Aggregate every matching score.json instead of only the latest run per task.",
+    )
+    parser.add_argument(
+        "--average-runs",
+        action="store_true",
+        help=(
+            "Average all matching runs per task before computing pass rates. "
+            "Useful with repeated --model-dir."
+        ),
     )
     parser.add_argument(
         "--pass-threshold",
@@ -71,7 +89,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Deprecated; average scores are always printed.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.all_runs and args.average_runs:
+        parser.error("--all-runs and --average-runs cannot be used together.")
+    if args.model and args.model_dirs:
+        parser.error("--model and --model-dir cannot be used together.")
+    return args
 
 
 def load_overall_score(score_path: Path) -> float | None:
@@ -87,6 +110,18 @@ def model_output_prefix(model: str) -> str:
     return re.sub(r"[^a-zA-Z0-9.\-_]", "_", short_model)
 
 
+def unique_model_dirs(model_dirs: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for model_dir in model_dirs:
+        value = model_dir.strip().rstrip("/")
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique
+
+
 def backend_roots(output_dir: Path, backend: str | None) -> list[Path]:
     if backend:
         return [output_dir / backend]
@@ -100,11 +135,21 @@ def task_score_paths(
     category: str,
     task_id: str,
     model_prefix: str | None,
+    model_dirs: list[str],
 ) -> list[Path]:
     score_paths: list[Path] = []
+    model_dir_names = {Path(model_dir).name for model_dir in model_dirs}
 
     # New pure-text layout: output/<backend>/<model>/<task_id>/score.json
-    if model_prefix:
+    if model_dirs:
+        for model_dir in model_dirs:
+            model_root = Path(model_dir)
+            if not model_root.is_absolute() and len(model_root.parts) == 1:
+                model_root = backend_root / model_dir
+            new_score = model_root / task_id / "score.json"
+            if new_score.exists():
+                score_paths.append(new_score)
+    elif model_prefix:
         new_score = backend_root / model_prefix / task_id / "score.json"
         if new_score.exists():
             score_paths.append(new_score)
@@ -115,7 +160,12 @@ def task_score_paths(
     legacy_task_output_dir = backend_root / category / task_id
     if legacy_task_output_dir.exists():
         legacy_scores = list(legacy_task_output_dir.glob("*/score.json"))
-        if model_prefix:
+        if model_dirs:
+            legacy_scores = [
+                path for path in legacy_scores
+                if path.parent.name in model_dir_names
+            ]
+        elif model_prefix:
             legacy_scores = [
                 path for path in legacy_scores
                 if path.parent.name.startswith(f"{model_prefix}_")
@@ -129,8 +179,10 @@ def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
     model_prefix = model_output_prefix(args.model) if args.model else None
-    rows: list[tuple[str, str, float, Path]] = []
+    model_dirs = unique_model_dirs(args.model_dirs)
+    rows: list[tuple[str, str, float, tuple[Path, ...]]] = []
     missing: list[str] = []
+    incomplete_average: list[str] = []
     roots = backend_roots(output_dir, args.backend)
     expected_by_category = Counter(Path(task_file).parent.name for task_file in PURE_TEXT_ENGLISH_TASKS)
 
@@ -141,10 +193,29 @@ def main() -> None:
 
         score_paths: list[Path] = []
         for root in roots:
-            score_paths.extend(task_score_paths(root, category, task_id, model_prefix))
+            score_paths.extend(task_score_paths(root, category, task_id, model_prefix, model_dirs))
 
         if not score_paths:
             missing.append(task_id)
+            continue
+
+        if args.average_runs:
+            scores: list[tuple[float, Path]] = []
+            for score_path in sorted(score_paths):
+                score = load_overall_score(score_path)
+                if score is not None:
+                    scores.append((score, score_path))
+
+            if not scores:
+                missing.append(task_id)
+                continue
+
+            if model_dirs and len(scores) < len(model_dirs):
+                incomplete_average.append(f"{task_id} ({len(scores)}/{len(model_dirs)})")
+
+            total_score = sum(score for score, _ in scores)
+            paths = tuple(path for _, path in scores)
+            rows.append((category, task_id, total_score / len(scores), paths))
             continue
 
         if not args.all_runs:
@@ -155,7 +226,7 @@ def main() -> None:
             if score is None:
                 missing.append(task_id)
                 continue
-            rows.append((category, task_id, score, score_path))
+            rows.append((category, task_id, score, (score_path,)))
 
     if not rows:
         print("No scored tasks found.")
@@ -166,10 +237,14 @@ def main() -> None:
     passed = sum(score >= args.pass_threshold for _, _, score, _ in rows)
 
     print(f"Scored entries: {len(rows)}")
+    if args.average_runs:
+        print(f"Run score entries averaged: {sum(len(paths) for _, _, _, paths in rows)}")
     if not args.all_runs:
         print(f"Scored tasks: {len(rows)} / {expected_count}")
     if missing:
         print(f"Missing or unscored tasks: {len(set(missing))}")
+    if incomplete_average:
+        print(f"Tasks with incomplete averaged runs: {len(incomplete_average)}")
     print(f"Pass threshold: overall_score >= {args.pass_threshold:g}")
     print(f"Overall pass rate: {passed} / {denominator} = {passed / denominator:.4f}")
     total = sum(score for _, _, score, _ in rows)
