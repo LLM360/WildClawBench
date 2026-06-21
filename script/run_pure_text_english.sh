@@ -17,8 +17,8 @@ Options handled by this wrapper:
   --model_name NAME      Model id/name for the custom endpoint.
   --api_key KEY          Optional API key for the custom endpoint.
   --preserve-thinking [BOOL]
-                         Preserve reasoning_content on replayed OpenClaw
-                         assistant turns. With no BOOL, defaults to true. Also accepts
+                         Preserve reasoning fields on replayed OpenClaw
+                         assistant turns. Defaults to true; also accepts
                          --no-preserve-thinking.
   -h, --help             Show this help.
 

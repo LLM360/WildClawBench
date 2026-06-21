@@ -63,6 +63,7 @@ class OpenClawAgent(BaseAgent):
                 extra_env=spec.task.get("env", ""),
                 tmp_path=tmp_path,
                 lobster_env=spec.lobster.get("env") if spec.lobster else None,
+                preserve_thinking=spec.openclaw_preserve_thinking,
             )
             if spec.lobster:
                 inject_lobster_workspace(spec.task_id, spec.lobster["workspace"])
@@ -70,7 +71,6 @@ class OpenClawAgent(BaseAgent):
             setup_workspace(
                 spec.task_id,
                 thinking=spec.thinking,
-                preserve_thinking=spec.openclaw_preserve_thinking,
             )
             setup_skills(spec.task_id, spec.task.get("skills", ""), spec.task.get("skills_path", ""))
             run_warmup(spec.task_id, spec.task.get("warmup", ""))

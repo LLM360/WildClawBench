@@ -18,7 +18,10 @@ WORKSPACE_BASELINE_PATH = "/tmp/wildclaw_workspace_baseline.json"
 
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
 
-def patch_openclaw_custom_openai_non_stream(task_id: str) -> None:
+def patch_openclaw_custom_openai_non_stream(
+    task_id: str,
+    preserve_thinking: bool | None = None,
+) -> None:
     """Use non-streaming Chat Completions for generated custom OpenAI-compatible models."""
     patch_cmd = r"""python3 - <<'PY'
 from pathlib import Path
@@ -47,9 +50,15 @@ helper_anchor = '''function hasToolHistory(messages) {
 }
 '''
 helper = helper_anchor + '''
-const CUSTOM_OPENAI_REASONING_PLACEHOLDER = "";
+const CUSTOM_OPENAI_REASONING_PLACEHOLDER = " ";
+const CUSTOM_OPENAI_PRESERVE_REASONING_HISTORY = __PRESERVE_REASONING_HISTORY__;
+const CUSTOM_OPENAI_REASONING_FIELDS = ["reasoning_content", "reasoning", "think", "think_fast", "think_faster"];
+const CUSTOM_OPENAI_RESPONSE_REASONING_FIELDS = [...CUSTOM_OPENAI_REASONING_FIELDS, "reasoning_text"];
 function hasNonEmptyText(value) {
     return typeof value === "string" && value.trim().length > 0;
+}
+function normalizeCustomOpenAIReasoningField(field) {
+    return CUSTOM_OPENAI_REASONING_FIELDS.includes(field) ? field : "reasoning_content";
 }
 function applyNonStreamingUsage(model, output, usage) {
     if (!usage) return;
@@ -109,39 +118,64 @@ function pushNonStreamingToolCall(stream, output, toolCall) {
     stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: output });
 }
 function readReasoningContent(msg) {
-    const reasoningFields = ["reasoning_content", "reasoning", "think", "think_fast", "think_faster", "reasoning_text"];
-    for (const field of reasoningFields) {
+    for (const field of CUSTOM_OPENAI_RESPONSE_REASONING_FIELDS) {
         const value = msg[field];
-        if (hasNonEmptyText(value)) return value;
-    }
-    if (Array.isArray(msg.content)) {
-        for (const block of msg.content) {
-            if (block?.type === "thinking" && hasNonEmptyText(block.thinking)) return block.thinking;
+        if (hasNonEmptyText(value)) {
+            return { text: value, field: normalizeCustomOpenAIReasoningField(field) };
         }
     }
-    for (const field of reasoningFields) {
-        const value = msg[field];
-        if (typeof value === "string") return value;
-    }
     if (Array.isArray(msg.content)) {
-        for (const block of msg.content) {
-            if (block?.type === "thinking" && typeof block.thinking === "string") return block.thinking;
+        const thinkingBlocks = msg.content.filter((block) => block?.type === "thinking");
+        if (thinkingBlocks.length > 0) {
+            const signature = thinkingBlocks.find(
+                (block) => typeof block.thinkingSignature === "string" && block.thinkingSignature.length > 0
+            )?.thinkingSignature;
+            const field = normalizeCustomOpenAIReasoningField(signature);
+            const nonEmptyThinking = thinkingBlocks
+                .filter((block) => hasNonEmptyText(block.thinking))
+                .map((block) => block.thinking);
+            if (nonEmptyThinking.length > 0) {
+                return { text: nonEmptyThinking.join("\\n"), field };
+            }
+            for (const block of thinkingBlocks) {
+                if (typeof block.thinking === "string") {
+                    return { text: block.thinking || CUSTOM_OPENAI_REASONING_PLACEHOLDER, field };
+                }
+            }
         }
     }
-    return CUSTOM_OPENAI_REASONING_PLACEHOLDER;
+    for (const field of CUSTOM_OPENAI_RESPONSE_REASONING_FIELDS) {
+        const value = msg[field];
+        if (typeof value === "string") {
+            return { text: value || CUSTOM_OPENAI_REASONING_PLACEHOLDER, field: normalizeCustomOpenAIReasoningField(field) };
+        }
+    }
+    return { text: CUSTOM_OPENAI_REASONING_PLACEHOLDER, field: "reasoning_content" };
+}
+function writeReasoningContent(msg, reasoning) {
+    const text = typeof reasoning?.text === "string" ? reasoning.text : CUSTOM_OPENAI_REASONING_PLACEHOLDER;
+    const field = normalizeCustomOpenAIReasoningField(reasoning?.field);
+    for (const staleField of CUSTOM_OPENAI_RESPONSE_REASONING_FIELDS) {
+        if (staleField in msg) delete msg[staleField];
+    }
+    // Different OpenAI-compatible reasoning backends validate different keys.
+    // Keep both common aliases, and retain the model-provided think* key when present.
+    msg.reasoning_content = text;
+    msg.reasoning = text;
+    if (field !== "reasoning_content" && field !== "reasoning") {
+        msg[field] = text;
+    }
 }
 function normalizeCustomOpenAIReasoningMessages(params) {
     // wildclaw-custom-openai-reasoning-history
+    if (!CUSTOM_OPENAI_PRESERVE_REASONING_HISTORY) return;
     if (!Array.isArray(params?.messages)) return;
     for (const msg of params.messages) {
         if (!msg || msg.role !== "assistant") continue;
-        msg.reasoning_content = readReasoningContent(msg);
+        writeReasoningContent(msg, readReasoningContent(msg));
         if (Array.isArray(msg.content)) {
             msg.content = msg.content.filter((block) => block?.type !== "thinking");
             if (msg.content.length === 0) msg.content = "";
-        }
-        for (const field of ["reasoning", "think", "think_fast", "think_faster", "reasoning_text"]) {
-            if (field in msg) delete msg[field];
         }
     }
 }
@@ -155,7 +189,7 @@ async function runCustomOpenAINonStreaming(client, params, model, output, stream
     const choice = response.choices?.[0];
     const message = choice?.message ?? {};
     if (choice?.finish_reason) output.stopReason = mapStopReason(choice.finish_reason);
-    const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
+    const reasoningFields = CUSTOM_OPENAI_RESPONSE_REASONING_FIELDS;
     let sawReasoning = false;
     for (const field of reasoningFields) {
         const thinking = message[field];
@@ -200,6 +234,10 @@ if old not in text:
     raise RuntimeError('OpenClaw non-stream branch anchor changed')
 path.write_text(text.replace(old, new, 1), encoding='utf-8')
 PY"""
+    patch_cmd = patch_cmd.replace(
+        "__PRESERVE_REASONING_HISTORY__",
+        "true" if preserve_thinking is not False else "false",
+    )
     r = subprocess.run(
         ["docker", "exec", task_id, "/bin/bash", "-c", patch_cmd],
         capture_output=True,
@@ -212,8 +250,14 @@ PY"""
 def remove_container(name: str) -> None:
     subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
-def start_container(task_id: str, workspace_path: str, extra_env: str = "",
-                    tmp_path: str = "", lobster_env: list[str] | None = None) -> None:
+def start_container(
+    task_id: str,
+    workspace_path: str,
+    extra_env: str = "",
+    tmp_path: str = "",
+    lobster_env: list[str] | None = None,
+    preserve_thinking: bool | None = None,
+) -> None:
     workspace = Path(workspace_path).expanduser()
     if not workspace.is_dir():
         raise RuntimeError(f"Workspace path does not exist or is not a directory: {workspace}")
@@ -260,7 +304,7 @@ def start_container(task_id: str, workspace_path: str, extra_env: str = "",
     if r.returncode != 0:
         raise RuntimeError(f"Container startup failed:\n{r.stderr}")
     logger.info("[%s] Container ID: %s", task_id, r.stdout.strip()[:12])
-    patch_openclaw_custom_openai_non_stream(task_id)
+    patch_openclaw_custom_openai_non_stream(task_id, preserve_thinking=preserve_thinking)
 
     if tmp_path and os.path.exists(tmp_path):
         mkdir_cmd = ["docker", "exec", task_id, "mkdir", "-p", "/tmp_workspace/tmp"]
@@ -279,7 +323,6 @@ def start_container(task_id: str, workspace_path: str, extra_env: str = "",
 def setup_workspace(
     task_id: str,
     thinking: str | None = None,
-    preserve_thinking: bool | None = None,
 ) -> None:
     logger.info("[%s] Copying /app → %s", task_id, TMP_WORKSPACE)
     r = subprocess.run(

@@ -72,8 +72,8 @@ def build_run_batch_parser(default_model: str, default_parallel: int) -> argpars
         choices=["true", "false"],
         default=None,
         help=(
-            "Preserve reasoning_content on replayed OpenClaw assistant turns. "
-            "Use true for DeepSeek-style OpenAI-compatible backends that require it."
+            "Preserve reasoning fields on replayed OpenClaw assistant turns. "
+            "Defaults to true for custom OpenAI-compatible backends; use false to disable."
         ),
     )
     return parser
