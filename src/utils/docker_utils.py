@@ -50,7 +50,7 @@ helper_anchor = '''function hasToolHistory(messages) {
 }
 '''
 helper = helper_anchor + '''
-const CUSTOM_OPENAI_REASONING_PLACEHOLDER = " ";
+const CUSTOM_OPENAI_REASONING_PLACEHOLDER = "";
 const CUSTOM_OPENAI_PRESERVE_REASONING_HISTORY = __PRESERVE_REASONING_HISTORY__;
 const CUSTOM_OPENAI_REASONING_FIELDS = ["reasoning_content", "reasoning", "think", "think_fast", "think_faster"];
 const CUSTOM_OPENAI_RESPONSE_REASONING_FIELDS = [...CUSTOM_OPENAI_REASONING_FIELDS, "reasoning_text"];
